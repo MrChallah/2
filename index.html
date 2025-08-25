@@ -128,6 +128,7 @@
   // Add location name caching
   let lastLocationName = null; // Cache last successful location name
   let lastLocationTimestamp = 0; // Track when location name was last fetched
+  const LS_KEY = 'ww_last_location_v2'; // persistent last-known location cache
   
   // Connection retry variables
   let isOnline = navigator.onLine;
@@ -416,15 +417,43 @@
     
     if (isLocalFile) {
       console.log('Local file detected, using Nominatim as primary geocoder');
-      return await reverseGeocodeWithNominatim(lat, lon);
+      try {
+        return await reverseGeocodeWithNominatim(lat, lon);
+      } catch (error) {
+        console.warn('Nominatim failed, falling back to Open-Meteo:', error.message);
+        return await reverseGeocodeWithOpenMeteo(lat, lon);
+      }
     }
     
     try {
       return await reverseGeocodeWithGoogle(lat, lon);
     } catch (error) {
       console.warn('Google geocoding failed, falling back to Nominatim:', error.message);
-      return await reverseGeocodeWithNominatim(lat, lon);
+      try {
+        return await reverseGeocodeWithNominatim(lat, lon);
+      } catch (error2) {
+        console.warn('Nominatim failed, falling back to Open-Meteo:', error2.message);
+        return await reverseGeocodeWithOpenMeteo(lat, lon);
+      }
     }
+  }
+
+  // Open-Meteo reverse geocoding fallback
+  async function reverseGeocodeWithOpenMeteo(lat, lon) {
+    const res = await fetchWithRetry(`https://geocoding-api.open-meteo.com/v1/reverse?latitude=${lat}&longitude=${lon}&language=en`);
+    const data = await res.json();
+    if (data && data.results && data.results.length > 0) {
+      const r = data.results[0];
+      const city = r.name || '';
+      const state = r.admin1 || '';
+      const country = r.country || '';
+      // store for flag system
+      window.currentCountryName = country || null;
+      window.currentCountryCode = r.country_code ? String(r.country_code).toUpperCase() : null;
+      console.log('Open-Meteo reverse geocoding result:', { city, state, country });
+      return filterLocationByWordCount(city, state, country);
+    }
+    throw new Error('No results from Open-Meteo Reverse Geocoding');
   }
   
   // Helper function to clean administrative terms from city names
@@ -1803,6 +1832,16 @@
           // Cache successful location name
           lastLocationName = label;
           lastLocationTimestamp = Date.now();
+          try {
+            localStorage.setItem(LS_KEY, JSON.stringify({
+              label,
+              lat: locationData.lat,
+              lon: locationData.lon,
+              countryName: window.currentCountryName,
+              countryCode: window.currentCountryCode,
+              ts: Date.now()
+            }));
+          } catch (e) { console.warn('localStorage set failed:', e); }
           
           console.log('Location updated:', locationData.source, label);
           
@@ -1815,9 +1854,29 @@
           if (lastLocationName) {
             console.log('Using cached location name due to geocoding failure');
             placeEl.textContent = lastLocationName;
+            // try stored country for flag
+            try {
+              const cached = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+              if (cached) {
+                window.currentCountryName = cached.countryName || window.currentCountryName;
+                window.currentCountryCode = cached.countryCode || window.currentCountryCode;
+              }
+            } catch {}
           } else {
-            // Only show "Location N/A" if no cached name is available
-            placeEl.textContent = "Location N/A";
+            // Try persistent cache as last resort
+            try {
+              const cached = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+              if (cached && cached.label) {
+                placeEl.textContent = cached.label;
+                window.currentCountryName = cached.countryName || null;
+                window.currentCountryCode = cached.countryCode || null;
+                updateCountryFlag();
+              } else {
+                placeEl.textContent = "Location N/A";
+              }
+            } catch {
+              placeEl.textContent = "Location N/A";
+            }
           }
         }
         
